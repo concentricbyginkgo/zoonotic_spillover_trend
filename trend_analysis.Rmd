@@ -1,0 +1,323 @@
+---
+title: "New evidence for the increasing frequency and severity of emerging zoonotic spillover events"
+author: "Amanda J. Meadows, PhD*, Nicole Stephenson, PhD, Nita K. Madhav, MSPH, and Ben Oppenheim, PhD"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 1
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+library(ggplot2) # for figures
+library(data.table)
+library(pander)
+library(MASS) # for negative binomial model
+library(rworldmap) # for mapping
+library(sf) # for mapping
+theme_set(theme_bw())
+```
+
+```{r}
+# Read in historical data
+event_table <- fread("./data/spillover_data.csv")
+
+# Calculate the total number of spillover events and deaths by year
+lossDatYear <- event_table[, list(reported_deaths = sum(reported_deaths),
+                                reported_cases = sum(reported_cases),
+                                reported_events = uniqueN(Event_name)),
+                         by = .(Event_start_year)]
+
+# Some years may not be represented in the data; these years need to be added to the data as 0s.
+lossDatYear <- lossDatYear[,.SD[CJ(Event_start_year = seq(min(Event_start_year), max(Event_start_year), by = 1), 
+                         unique = T),  on = .(Event_start_year)]] # expand data to one row/year during the analysis period
+## missing data means no spillover events/cases/deaths were reported
+lossDatYear[is.na(reported_deaths), reported_deaths := 0] 
+lossDatYear[is.na(reported_cases), reported_cases := 0]
+lossDatYear[is.na(reported_events), reported_events := 0]
+```
+
+# Introduction
+
+* This script shows all analyses performed for "New evidence for the increasing frequency and severity of emerging zoonotic spillover events"
+* The annual number of spillover events and deaths caused by selected pathogens and occurring between 1960 and 2019 were analyzed.
+
+# Selected Pathogens
+
+The pathogens included in this analysis after exclusion criteria (see Box 1 in paper text and Supplementary Table 1) were: SARS Coronavirus, Ebolaviruses, Marburg virus, Nipah virus, and Machupo virus.
+
+## Data summary
+
+The number of outbreaks and deaths by each selected pathogen 1960 through 2019:
+
+```{r, results = 'asis'}
+# Calculate number of spillover events and deaths caused by each pathogen
+pathogen_tab <- event_table[, list(`Spillover events` = uniqueN(Event_name), Deaths = sum(reported_deaths)), by = .(Pathogen)]
+cat(pander(pathogen_tab[order(-Deaths)]))
+```
+
+# Spillover Map
+
+A map showing the total number of  spillover events caused by Ebolaviruses, Marburg virus, SARS Coronavirus, Nipah virus, and Machupo virus, by country. Countries are shaded by spillover event count; unshaded countries have no documented spillover of the included pathogens.
+
+```{r}
+# Determine number of spillover events by country during analysis period
+spillover_map <- event_table[, list(Spillovers = .N), by = .(Event_start_country)][order(-Spillovers)]
+spillover_map[, ISO2 := countrycode::countrycode(sourcevar = Event_start_country, origin = "country.name", destination = "iso2c")]
+worlddata<- getMap(resolution='low')
+worlddata$ISO_A2[is.na(worlddata$ISO_A2)]<-"NA"
+map_data_order <- data.table(ISO2 = worlddata$ISO_A2, ISO3= worlddata$ISO_A3)
+map_data_order[is.na(ISO2), ISO2 := "NA"]
+map_data_order[spillover_map, Spillovers := i.Spillovers, on = .(ISO2)]
+worlddata$Spillovers<- map_data_order$Spillovers
+worlddata_sf <- st_as_sf(worlddata)
+
+ggplot(worlddata_sf)+ geom_sf(aes(fill = Spillovers), size = 0.5)+
+  scale_fill_continuous(low="thistle2", high="darkred", 
+                       guide="colorbar",na.value="transparent")+
+  theme(legend.title = element_text( size=11), legend.text=element_text(size=8),
+        legend.key.size = unit(0.5, 'cm'))
+#ggsave(filename = "figures/Figure1.jpeg", device = "jpeg", width = 6, height = 4, units = "in")
+```
+
+# Annual trend {.tabset}
+
+* Analyzing trend in annual spillover events and deaths caused by Ebolaviruses, Marburg virus, SARS Coronavirus, Nipah virus, and Machupo virus from 1960 through 2019 (training data excludes ongoing events).
+* Comparing a Poisson and negative binoimal fit.
+
+## Spillover events{.tabset .tabset-pills}
+
+### Distribution
+
+```{r}
+hist(lossDatYear$reported_events)
+```
+
+
+### Poisson fit
+
+```{r}
+pois_mod <- glm(reported_events~ Event_start_year, data = lossDatYear, family = "poisson")
+summary(pois_mod)
+lossDatYear[, pois_link_events := predict(pois_mod, newdata = lossDatYear)]
+lossDatYear[, pois_se_link := predict(pois_mod, newdata = lossDatYear, se = T)[2]]
+
+modfam <- family(pois_mod)
+ilink <- modfam$linkinv
+
+lossDatYear[, pois_pred_events := ilink(pois_link_events)]
+lossDatYear[, pois_events_upr := ilink(pois_link_events + 1.96*pois_se_link)]
+lossDatYear[, pois_events_lwr := ilink(pois_link_events - 1.96*pois_se_link)]
+```
+
+
+```{r}
+ggplot(lossDatYear) + 
+  geom_point(aes(x = Event_start_year, y = reported_events), size = 0.75)+ 
+  geom_line(aes(x = Event_start_year, y = pois_pred_events), color = "gray")+
+    geom_line(aes(x = Event_start_year, y = pois_events_upr), color = "navy", linetype = "dashed")+
+    geom_line(aes(x = Event_start_year, y = pois_events_lwr), color = "navy", linetype = "dashed")+
+  ylab("Reported events") + xlab("Year")
+```
+
+#### AIC
+
+```{r}
+AIC(pois_mod)
+```
+
+### Negative binomial
+
+```{r}
+nb_mod <- glm.nb(reported_events~ Event_start_year, data = lossDatYear)
+summary(nb_mod)
+lossDatYear[, nb_link_events := predict(nb_mod, newdata = lossDatYear)]
+lossDatYear[, nb_se_link := predict(nb_mod, newdata = lossDatYear, se = T)[2]]
+
+nb_modfam <- family(nb_mod)
+nb_ilink <- nb_modfam$linkinv
+
+lossDatYear[, nb_pred_events := nb_ilink(nb_link_events)]
+lossDatYear[, nb_events_upr := nb_ilink(nb_link_events + 1.96*nb_se_link)]
+lossDatYear[, nb_events_lwr := nb_ilink(nb_link_events - 1.96*nb_se_link)]
+```
+
+```{r}
+a <- ggplot(lossDatYear) + 
+  geom_point(aes(x = Event_start_year, y = reported_events), size = 0.75)+ 
+  geom_line(aes(x = Event_start_year, y = nb_pred_events), color = "gray")+
+    geom_line(aes(x = Event_start_year, y = nb_events_upr), color = "navy", linetype = "dashed")+
+    geom_line(aes(x = Event_start_year, y = nb_events_lwr), color = "navy", linetype = "dashed")+
+  ylab("Reported events") + xlab("Year") + ggtitle("a)")
+a
+```
+
+#### AIC
+
+```{r}
+AIC(nb_mod)
+```
+
+## Deaths {.tabset .tabset-pills}
+
+### Distribution
+
+```{r}
+hist(lossDatYear$reported_deaths)
+```
+
+### Poisson fit
+
+```{r}
+death_pois_mod <- glm(reported_deaths~ Event_start_year, data = lossDatYear, family = "poisson")
+summary(death_pois_mod)
+lossDatYear[, pois_link_deaths := predict(death_pois_mod, newdata = lossDatYear)]
+lossDatYear[, pois_se_link_deaths := predict(death_pois_mod, newdata = lossDatYear, se = T)[2]]
+
+modfam_pois_death <- family(death_pois_mod)
+ilink_pois_death <- modfam_pois_death$linkinv
+lossDatYear[, pois_pred_deaths := ilink_pois_death(pois_link_deaths)]
+lossDatYear[, pois_deaths_upr := ilink_pois_death(pois_link_deaths + 1.96*pois_se_link_deaths)]
+lossDatYear[, pois_deaths_lwr := ilink_pois_death(pois_link_deaths - 1.96*pois_se_link_deaths)]
+```
+
+
+```{r}
+ggplot(lossDatYear) + 
+  geom_point(aes(x = Event_start_year, y = reported_deaths), size = 0.75)+ 
+  geom_line(aes(x = Event_start_year, y = pois_pred_deaths), color = "gray")+
+    geom_line(aes(x = Event_start_year, y = pois_deaths_upr), color = "navy", linetype = "dashed")+
+    geom_line(aes(x = Event_start_year, y = pois_deaths_lwr), color = "navy", linetype = "dashed")+
+  ylab("Reported deaths") + xlab("Year")
+```
+
+#### AIC
+
+```{r}
+AIC(death_pois_mod)
+```
+
+### Negative binomial
+
+```{r}
+library(MASS)
+nb_mod_deaths <- glm.nb(reported_deaths~ Event_start_year, data = lossDatYear)
+summary(nb_mod_deaths)
+lossDatYear[, nb_link_deaths := predict(nb_mod_deaths, newdata = lossDatYear)]
+lossDatYear[, nb_se_link_deaths := predict(nb_mod_deaths, newdata = lossDatYear, se = T)[2]]
+
+nb_modfam_deaths <- family(nb_mod_deaths)
+nb_ilink_deaths <- nb_modfam_deaths$linkinv
+
+lossDatYear[, nb_pred_deaths := nb_ilink_deaths(nb_link_deaths)]
+lossDatYear[, nb_deaths_upr := nb_ilink(nb_link_deaths + 1.96*nb_se_link_deaths)]
+lossDatYear[, nb_deaths_lwr := nb_ilink(nb_link_deaths - 1.96*nb_se_link_deaths)]
+```
+
+```{r}
+b <- ggplot(lossDatYear) + 
+  geom_point(aes(x = Event_start_year, y = reported_deaths), size = 0.75)+ 
+  geom_line(aes(x = Event_start_year, y = nb_pred_deaths), color = "gray")+
+    geom_line(aes(x = Event_start_year, y = nb_deaths_upr), color = "navy", linetype = "dashed")+
+    geom_line(aes(x = Event_start_year, y = nb_deaths_lwr), color = "navy", linetype = "dashed")+
+  ylab("Reported deaths") + xlab("Year") + ggtitle("b)") + ylim(c(0,12000))+
+  ggbreak::scale_y_break(c(5000,11000), ticklabels= c(11000, 12000))  + theme(axis.ticks.y.right = element_blank(),
+                                                                              axis.text.y.right = element_blank())
+b
+#c <- gridExtra::grid.arrange(a, print(b), ncol = 2)
+#ggsave(plot = c, filename = "figures/Figure2.jpeg", device = "jpeg", width = 9, height = 4, units = "in")
+```
+
+#### AIC
+
+```{r}
+AIC(nb_mod_deaths)
+```
+
+### Follow-up analysis: exclude West Africa Ebola event
+
+* The West Africa Ebola event caused nearly 5 times more reported deaths than the next highest severity event in the dataset, which may be driving the significant temporal trend.
+* Re-running the analysis excluding this event to ensure the significant temporal trend remains.
+
+```{r}
+# Calculate the total number of spillover events and deaths by year
+event_table_exclude <- event_table[Event_name != "Zaire ebolavirus_Guinea_2013"]
+lossDatYear_exclude <- event_table_exclude[, list(reported_deaths = sum(reported_deaths),
+                                                  reported_cases = sum(reported_cases),
+                                                  reported_events = uniqueN(Event_name)),
+                                           by = .(Event_start_year)]
+
+# Some years may not be represented in the data; these years need to be added to the data as 0s.
+lossDatYear_exclude <- lossDatYear_exclude[,.SD[CJ(Event_start_year = seq(min(Event_start_year), max(Event_start_year), by = 1), 
+                         unique = T),  on = .(Event_start_year)]] # expand data to one row/year during the analysis period
+## missing data means no spillover events/cases/deaths were reported
+lossDatYear_exclude[is.na(reported_deaths), reported_deaths := 0] 
+lossDatYear_exclude[is.na(reported_cases), reported_cases := 0]
+lossDatYear_exclude[is.na(reported_events), reported_events := 0]
+```
+
+```{r}
+mod_deaths_exclude <- glm.nb(reported_deaths~ Event_start_year, data = lossDatYear_exclude)
+summary(mod_deaths_exclude)
+```
+
+## Conclusions
+
+* Negative binomial model seems like the better choice for deaths due to overdispersion; not much difference between the models for events.
+* Confidence intervals look better with negative binomial model.
+
+# Future predictions {.tabset}
+
+```{r}
+# Predicting out to 2035
+newDat <- data.table("Event_start_year" = seq(1960, 2050, 1))
+
+# Events
+newDat[, link_events := predict(nb_mod, newdata = newDat)]
+newDat[, se_link := predict(nb_mod, newdata = newDat, se = T)[2]]
+
+modfam <- family(nb_mod)
+ilink <- modfam$linkinv
+
+newDat[, pred_events := ilink(link_events)]
+newDat[, events_upr := ilink(link_events + 1.96*se_link)]
+newDat[, events_lwr := ilink(link_events - 1.96*se_link)]
+
+# Deaths
+newDat[, link_deaths := predict(nb_mod_deaths, newdata = newDat)]
+newDat[, se_link_deaths := predict(nb_mod_deaths, newdata = newDat, se = T)[2]]
+
+modfam_deaths <- family(nb_mod_deaths)
+ilink_deaths <- modfam_deaths$linkinv
+
+newDat[, pred_deaths := ilink_deaths(link_deaths)]
+newDat[, deaths_upr := ilink_deaths(link_deaths + 1.96*se_link_deaths)]
+newDat[, deaths_lwr := ilink_deaths(link_deaths - 1.96*se_link_deaths)]
+```
+
+
+The total number of spillover events and deaths predicted to occur in 2020 and 2050 (±95% CI) according to the historical trend model.
+
+```{r, results = 'asis'}
+predTable <- newDat[Event_start_year %in%  c(2020,2050), ][, list(Event_start_year,
+                                                       Events_lwr = events_lwr,
+                                                       Events_upr = events_upr,
+                                                       Events = pred_events,
+                                                       Deaths_lwr = deaths_lwr,
+                                                       Deaths_upr = deaths_upr,
+                                                       Deaths = pred_deaths)]
+
+predTable <- predTable[, list("Year" = Event_start_year, "Predicted spillover events" = paste0(round(Events,0),
+                                                " [",round(Events_lwr, 0)," - ", round(Events_upr, 0), "]"),
+                              "Predicted deaths" = paste0(format(round(Deaths, 0), big.mark = ","),
+                                                " [", round(Deaths_lwr, 0), " - ", format(round(Deaths_upr, 0), big.mark = ","), "]"))]
+cat(pander(predTable))
+```
+
+# Contact
+
+* Amanda Meadows: ameadows@ginkgobioworks.com
