@@ -1,5 +1,5 @@
 ---
-title: "Historical trends demonstrate a pattern of increasingly frequent and severe epidemics of  high-consequence zoonotic viruses"
+title: "Historical trends demonstrate a pattern of increasingly frequent and severe spillover events of high-consequence zoonotic viruses"
 author: "Amanda J. Meadows, PhD*, Nicole Stephenson, PhD, Nita K. Madhav, MSPH, and Ben Oppenheim, PhD"
 date: "`r Sys.Date()`"
 output: 
@@ -19,6 +19,7 @@ library(pander)
 library(MASS) # for negative binomial model
 library(rworldmap) # for mapping
 library(sf) # for mapping
+library(viridis) # color palette
 theme_set(theme_bw())
 ```
 
@@ -43,7 +44,7 @@ lossDatYear[is.na(reported_events), reported_events := 0]
 
 # Introduction
 
-* This script shows all analyses performed for "Historical trends demonstrate a pattern of increasingly frequent and severe epidemics of  high-consequence zoonotic viruses"
+* This script shows all analyses performed for "Historical trends demonstrate a pattern of increasingly frequent and severe spillover events of high-consequence zoonotic viruses"
 * The annual number of spillover events and deaths caused by selected pathogens and occurring between 1960 and 2019 were analyzed.
 
 # Selected Pathogens
@@ -62,23 +63,27 @@ cat(pander(pathogen_tab[order(-Deaths)]))
 
 # Spillover Map
 
-A map showing the total number of  spillover events caused by Ebolaviruses, Marburg virus, SARS Coronavirus, Nipah virus, and Machupo virus, by country. Countries are shaded by spillover event count; unshaded countries have no documented spillover of the included pathogens.
+A map showing proportion of total included spillover events caused by Ebolaviruses, Marburg virus, SARS Coronavirus, Nipah virus, and Machupo virus, by country. Countries are shaded by proportion of spillover events; unshaded countries have no documented spillover of the included pathogens.
 
 ```{r}
 # Determine number of spillover events by country during analysis period
 spillover_map <- event_table[, list(Spillovers = .N), by = .(Event_start_country)][order(-Spillovers)]
+spillover_map[, prop_Spillovers := Spillovers/sum(Spillovers)]
 spillover_map[, ISO2 := countrycode::countrycode(sourcevar = Event_start_country, origin = "country.name", destination = "iso2c")]
 worlddata<- getMap(resolution='low')
 worlddata$ISO_A2[is.na(worlddata$ISO_A2)]<-"NA"
 map_data_order <- data.table(ISO2 = worlddata$ISO_A2, ISO3= worlddata$ISO_A3)
 map_data_order[is.na(ISO2), ISO2 := "NA"]
 map_data_order[spillover_map, Spillovers := i.Spillovers, on = .(ISO2)]
+map_data_order[spillover_map, prop_Spillovers := i.prop_Spillovers, on = .(ISO2)]
 worlddata$Spillovers<- map_data_order$Spillovers
+worlddata$prop_Spillovers<- map_data_order$prop_Spillovers
 worlddata_sf <- st_as_sf(worlddata)
 
-ggplot(worlddata_sf)+ geom_sf(aes(fill = Spillovers), size = 0.5)+
-  scale_fill_continuous(low="thistle2", high="darkred", 
-                       guide="colorbar",na.value="transparent")+
+ggplot(worlddata_sf)+ geom_sf(aes(fill = prop_Spillovers), size = 0.5)+
+  scale_fill_viridis(name = "Proportion of spillovers",
+                     na.value = 'white', 
+                     direction = -1)+
   theme(legend.title = element_text( size=11), legend.text=element_text(size=8),
         legend.key.size = unit(0.5, 'cm'))
 #ggsave(filename = "figures/Figure1.jpeg", device = "jpeg", width = 6, height = 4, units = "in")
